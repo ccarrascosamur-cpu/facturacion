@@ -1,20 +1,4 @@
-// --- Validación de ENV y diagnóstico
-const SHOP = process.env.SHOPIFY_SHOP;
-const ADMIN_TOKEN = process.env.SHOPIFY_TOKEN;
-const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-const BSALE_TOKEN = process.env.BSALE_TOKEN;
-
-console.log('ENV CHECK -> SHOPIFY_SHOP:', SHOP || '(MISSING)');
-console.log('ENV CHECK -> SHOPIFY_TOKEN:', ADMIN_TOKEN ? 'OK' : '(MISSING)');
-console.log('ENV CHECK -> SHOPIFY_WEBHOOK_SECRET:', WEBHOOK_SECRET ? 'OK' : '(MISSING)');
-console.log('ENV CHECK -> BSALE_TOKEN:', BSALE_TOKEN ? 'OK' : '(MISSING)');
-
-function hasAllEnv() {
-  return SHOP && ADMIN_TOKEN && WEBHOOK_SECRET && BSALE_TOKEN;
-}
-
-
-// server.js — Shopify <-> Bsale en Render (Webhook + Sync SKUs)
+// server.js — Shopify <-> Bsale en Render (Webhook + Sync SKUs) con ENV check
 require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
@@ -22,35 +6,53 @@ const cron = require('node-cron');
 
 const app = express();
 
-// ---------- ENV
-const SHOP = process.env.SHOPIFY_SHOP;                  // p.ej. ugachile.myshopify.com
-const ADMIN_TOKEN = process.env.SHOPIFY_TOKEN;          // shpat_xxx (Admin API access token)
-const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; // API secret key (para HMAC)
-const BSALE_TOKEN = process.env.BSALE_TOKEN;            // Token de Bsale
+// ======================= ENV (declarar SOLO una vez) =======================
+const {
+  SHOPIFY_SHOP,
+  SHOPIFY_TOKEN,
+  SHOPIFY_WEBHOOK_SECRET,
+  BSALE_TOKEN,
+  PORT
+} = process.env;
 
-const GQL = `https://${SHOP}/admin/api/2025-07/graphql.json`;
-const SHOPIFY_HEADERS = {
-  'X-Shopify-Access-Token': ADMIN_TOKEN,
-  'Content-Type': 'application/json'
-};
+const SHOP = SHOPIFY_SHOP;                 // p.ej. ugachile.myshopify.com
+const ADMIN_TOKEN = SHOPIFY_TOKEN;         // shpat_...
+const WEBHOOK_SECRET = SHOPIFY_WEBHOOK_SECRET;
 
+// Diagnóstico en logs
+console.log('ENV CHECK -> SHOPIFY_SHOP:', SHOP || '(MISSING)');
+console.log('ENV CHECK -> SHOPIFY_TOKEN:', ADMIN_TOKEN ? 'OK' : '(MISSING)');
+console.log('ENV CHECK -> SHOPIFY_WEBHOOK_SECRET:', WEBHOOK_SECRET ? 'OK' : '(MISSING)');
+console.log('ENV CHECK -> BSALE_TOKEN:', BSALE_TOKEN ? 'OK' : '(MISSING)');
+
+function hasAllEnv() {
+  return Boolean(SHOP && ADMIN_TOKEN && WEBHOOK_SECRET && BSALE_TOKEN);
+}
+
+// Construcción condicional de URLs (evita “undefined”)
+const GQL = hasAllEnv() ? `https://${SHOP}/admin/api/2025-07/graphql.json` : null;
 const BSALE_API = 'https://api.bsale.cl/v1';
-const BSALE_HEADERS = {
-  'access_token': BSALE_TOKEN,
-  'Content-Type': 'application/json'
-};
 
-// ---------- Healthcheck
+// Headers fijos
+const SHOPIFY_HEADERS = hasAllEnv()
+  ? { 'X-Shopify-Access-Token': ADMIN_TOKEN, 'Content-Type': 'application/json' }
+  : null;
+const BSALE_HEADERS = BSALE_TOKEN
+  ? { 'access_token': BSALE_TOKEN, 'Content-Type': 'application/json' }
+  : null;
+
+// ======================= Rutas básicas =======================
 app.get('/', (_req, res) => res.send('OK'));
 
-// ---------- JSON para todo salvo el webhook (que usa RAW)
+// JSON global excepto webhook (usa RAW)
 app.use((req, res, next) => {
   if (req.path === '/webhooks/orders-paid') return next();
   express.json({ type: '*/*' })(req, res, next);
 });
 
-// ---------- Utilidades Shopify (GraphQL)
+// ======================= Shopify helpers =======================
 async function gql(query, variables = {}) {
+  if (!GQL) throw new Error('GQL URL not ready (missing ENV)');
   const r = await fetch(GQL, {
     method: 'POST',
     headers: SHOPIFY_HEADERS,
@@ -97,22 +99,23 @@ async function updateVariantSKU(variantId, newSKU) {
   return d.productVariantUpdate.productVariant;
 }
 
-// ---------- Bsale helpers
+// ======================= Bsale helpers =======================
 async function fetchBsaleVariants(offset = 0, limit = 50) {
+  if (!BSALE_HEADERS) throw new Error('BSALE headers not ready (missing token)');
   const url = `${BSALE_API}/variants.json?limit=${limit}&offset=${offset}&fields=[id,code,barCode,description,product]`;
-  const r = await fetch(url, { headers: { 'access_token': BSALE_TOKEN } });
+  const r = await fetch(url, { headers: BSALE_HEADERS });
   if (!r.ok) throw new Error(`Bsale variants ${r.status}`);
   return r.json(); // { items, count, limit, offset }
 }
 
-// Crea documento en Bsale (boleta/factura) — AJUSTA a tu configuración si usas neto/bruto, sucursal, etc.
 async function createBsaleDocument({ order, attrs }) {
+  if (!BSALE_HEADERS) throw new Error('BSALE headers not ready (missing token)');
   const isFactura = (attrs.document_type || 'boleta').toLowerCase() === 'factura';
-  const documentTypeId = isFactura ? 33 : 39; // valida en tu cuenta Bsale
+  const documentTypeId = isFactura ? 33 : 39; // ajusta si tu cuenta difiere
 
   const details = (order.line_items || []).map(li => ({
     quantity: li.quantity,
-    netUnitValue: Number(li.price), // si tus precios en Shopify son brutos, calcula neto (19% IVA)
+    netUnitValue: Number(li.price), // si tus precios son brutos, calcula neto
     description: li.title,
     code: li.sku || ''
   }));
@@ -146,8 +149,8 @@ async function createBsaleDocument({ order, attrs }) {
   return data;
 }
 
-// Guarda una notita en el pedido (puedes mover a metafield si quieres)
 async function saveOrderNote(orderId, text) {
+  if (!hasAllEnv()) return;
   const url = `https://${SHOP}/admin/api/2025-07/orders/${orderId}.json`;
   const r = await fetch(url, {
     method: 'PUT',
@@ -160,13 +163,12 @@ async function saveOrderNote(orderId, text) {
   if (!r.ok) console.error('No se pudo guardar nota en pedido:', await r.text());
 }
 
-// ---------- Webhook raw (HMAC primero, parse después)
+// ======================= Webhook (RAW + HMAC) =======================
 app.post('/webhooks/orders-paid', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
-    // Verificar HMAC
     const hmacHeader = req.get('X-Shopify-Hmac-Sha256') || '';
     const digest = crypto.createHmac('sha256', WEBHOOK_SECRET || '')
-      .update(req.body) // Buffer crudo
+      .update(req.body) // Buffer
       .digest('base64');
 
     const safeEqual = (a, b) => {
@@ -175,39 +177,43 @@ app.post('/webhooks/orders-paid', express.raw({ type: 'application/json' }), asy
     };
     const valid = safeEqual(hmacHeader, digest);
     if (!valid) {
-      console.warn('[WEBHOOK] HMAC inválida (en pruebas devolvemos 200)');
+      console.warn('[WEBHOOK] HMAC inválida (respondemos 200 en pruebas)');
       // return res.status(401).send('Invalid signature');
     }
 
-    // Parse JSON recién ahora
     const order = JSON.parse(req.body.toString('utf8'));
     console.log('[WEBHOOK] Order paid:', order?.id, order?.name);
 
-    // Leer atributos del carrito (note_attributes) para Factura
     const attrs = {};
     (order.note_attributes || []).forEach(a => { attrs[a.name] = a.value; });
 
-    // Emisión Bsale (descomenta para activar realmente)
-    try {
-      const doc = await createBsaleDocument({ order, attrs });
-      const resumen = `Bsale OK: ID ${doc?.id ?? 'N/A'}`;
-      await saveOrderNote(order.id, resumen);
-      console.log('[WEBHOOK] Documento Bsale emitido:', doc?.id);
-    } catch (e) {
-      console.error('[WEBHOOK] Falló emisión Bsale:', e.message);
-      // En pruebas, no fallamos el webhook
+    // Emite documento Bsale (no fallar el webhook si algo sale mal)
+    if (hasAllEnv()) {
+      try {
+        const doc = await createBsaleDocument({ order, attrs });
+        const resumen = `Bsale OK: ID ${doc?.id ?? 'N/A'}`;
+        await saveOrderNote(order.id, resumen);
+        console.log('[WEBHOOK] Documento Bsale emitido:', doc?.id);
+      } catch (e) {
+        console.error('[WEBHOOK] Falló emisión Bsale:', e.message);
+      }
+    } else {
+      console.warn('[WEBHOOK] Saltando Bsale: faltan ENV');
     }
 
     res.sendStatus(200);
   } catch (err) {
     console.error('[WEBHOOK] Error:', err);
-    // Para evitar reintentos masivos mientras pruebas:
-    res.sendStatus(200);
+    res.sendStatus(200); // evitar reintentos mientras pruebas
   }
 });
 
-// ---------- Sync SKUs (cada 2 min). Nota: en plan free, si Render “duerme”, reanudará al primer request.
+// ======================= Sync SKUs (cron cada 2 min) =======================
 async function syncSKUs() {
+  if (!hasAllEnv()) {
+    console.warn('[SYNC] Saltando: faltan ENV');
+    return;
+  }
   console.log('[SYNC] Iniciando…', new Date().toISOString());
   let offset = 0, limit = 50, processed = 0, updated = 0;
 
@@ -235,24 +241,29 @@ async function syncSKUs() {
   return { processed, updated };
 }
 
-// Endpoint manual para disparar sync
+// Endpoint manual
 app.post('/sync/skus', async (_req, res) => {
   try {
     const result = await syncSKUs();
-    res.json(result);
+    res.json(result || { skipped: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Programación cada 2 minutos
-cron.schedule('*/2 * * * *', async () => {
-  try { await syncSKUs(); } catch (e) { console.error('[CRON]', e); }
+// Programa el cron solo si hay ENV completas
+if (hasAllEnv()) {
+  cron.schedule('*/2 * * * *', async () => {
+    try { await syncSKUs(); } catch (e) { console.error('[CRON]', e); }
+  });
+} else {
+  console.warn('[CRON] Deshabilitado: faltan variables de entorno.');
+}
+
+// ======================= Start =======================
+const listenPort = PORT || 10000; // Render asigna PORT
+app.listen(listenPort, () => {
+  console.log(`Server on :${listenPort}`);
 });
 
-// ---------- Start (Render asigna PORT)
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`Server on :${PORT}`);
-});
