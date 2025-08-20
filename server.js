@@ -162,6 +162,43 @@ async function saveOrderNote(orderId, text) {
   });
   if (!r.ok) console.error('No se pudo guardar nota en pedido:', await r.text());
 }
+// --- Descubrimiento de tipos de documento en Bsale
+const BSALE_DOC_FACTURA_ID = process.env.BSALE_DOC_FACTURA_ID
+  ? Number(process.env.BSALE_DOC_FACTURA_ID) : null;
+const BSALE_DOC_BOLETA_ID = process.env.BSALE_DOC_BOLETA_ID
+  ? Number(process.env.BSALE_DOC_BOLETA_ID) : null;
+
+async function fetchBsaleDocumentTypes() {
+  const url = `${BSALE_API}/document_types.json?limit=50&offset=0`;
+  const r = await fetch(url, { headers: BSALE_HEADERS });
+  if (!r.ok) throw new Error(`Bsale document_types ${r.status}`);
+  return r.json();
+}
+
+async function getDocumentTypeIds() {
+  if (BSALE_DOC_FACTURA_ID && BSALE_DOC_BOLETA_ID) {
+    return { FACTURA: BSALE_DOC_FACTURA_ID, BOLETA: BSALE_DOC_BOLETA_ID };
+  }
+
+  const data = await fetchBsaleDocumentTypes();
+  const items = data.items || data;
+
+  let factura = items.find(t =>
+    String(t.siiCode || t.code || '') === '33' || /factura/i.test(t.name || '')
+  );
+  let boleta = items.find(t =>
+    String(t.siiCode || t.code || '') === '39' || /boleta/i.test(t.name || '')
+  );
+
+  if (!factura || !boleta) {
+    console.warn('[BSALE] No pude identificar Factura/Boleta. Resumen:',
+      items.map(x => ({ id: x.id, name: x.name, siiCode: x.siiCode || x.code }))
+    );
+    throw new Error('No se pudieron detectar los IDs de documento en Bsale');
+  }
+
+  return { FACTURA: factura.id, BOLETA: boleta.id };
+}
 
 // ======================= Webhook (RAW + HMAC) =======================
 app.post('/webhooks/orders-paid', express.raw({ type: 'application/json' }), async (req, res) => {
