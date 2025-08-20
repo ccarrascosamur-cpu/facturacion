@@ -1,3 +1,19 @@
+// --- Validación de ENV y diagnóstico
+const SHOP = process.env.SHOPIFY_SHOP;
+const ADMIN_TOKEN = process.env.SHOPIFY_TOKEN;
+const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+const BSALE_TOKEN = process.env.BSALE_TOKEN;
+
+console.log('ENV CHECK -> SHOPIFY_SHOP:', SHOP || '(MISSING)');
+console.log('ENV CHECK -> SHOPIFY_TOKEN:', ADMIN_TOKEN ? 'OK' : '(MISSING)');
+console.log('ENV CHECK -> SHOPIFY_WEBHOOK_SECRET:', WEBHOOK_SECRET ? 'OK' : '(MISSING)');
+console.log('ENV CHECK -> BSALE_TOKEN:', BSALE_TOKEN ? 'OK' : '(MISSING)');
+
+function hasAllEnv() {
+  return SHOP && ADMIN_TOKEN && WEBHOOK_SECRET && BSALE_TOKEN;
+}
+
+
 // server.js — Shopify <-> Bsale en Render (Webhook + Sync SKUs)
 require('dotenv').config();
 const express = require('express');
