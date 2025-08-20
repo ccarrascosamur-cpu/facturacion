@@ -224,26 +224,33 @@ app.post('/webhooks/orders-paid', express.raw({ type: 'application/json' }), asy
     const attrs = {};
     (order.note_attributes || []).forEach(a => { attrs[a.name] = a.value; });
 
-    // Emite documento Bsale (no fallar el webhook si algo sale mal)
-    if (hasAllEnv()) {
-      try {
-        const doc = await createBsaleDocument({ order, attrs });
-        const resumen = `Bsale OK: ID ${doc?.id ?? 'N/A'}`;
-        await saveOrderNote(order.id, resumen);
-        console.log('[WEBHOOK] Documento Bsale emitido:', doc?.id);
-      } catch (e) {
-        console.error('[WEBHOOK] Falló emisión Bsale:', e.message);
-      }
-    } else {
-      console.warn('[WEBHOOK] Saltando Bsale: faltan ENV');
+ // Emite documento Bsale (no fallar el webhook si algo sale mal)
+if (hasAllEnv()) {
+  try {
+    // Inicializar IDs de documento si aún no se cargaron
+    if (!global.__DOC_TYPES__) {
+      global.__DOC_TYPES__ = await getDocumentTypeIds();
+      console.log('[BSALE] Tipos detectados:', global.__DOC_TYPES__);
     }
 
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('[WEBHOOK] Error:', err);
-    res.sendStatus(200); // evitar reintentos mientras pruebas
+    const doc = await createBsaleDocument({ 
+      order, 
+      attrs, 
+      docTypes: global.__DOC_TYPES__   // <<--- pasamos IDs aquí
+    });
+
+    const resumen = `Bsale OK: ID ${doc?.id ?? 'N/A'}`;
+    await saveOrderNote(order.id, resumen);
+    console.log('[WEBHOOK] Documento Bsale emitido:', doc?.id);
+  } catch (e) {
+    console.error('[WEBHOOK] Falló emisión Bsale:', e.message);
   }
-});
+} else {
+  console.warn('[WEBHOOK] Saltando Bsale: faltan ENV');
+}
+
+res.sendStatus(200);
+
 
 // ======================= Sync SKUs (cron cada 2 min) =======================
 async function syncSKUs() {
